@@ -196,13 +196,10 @@ Lifecycle is managed by `MainViewModel`:
 
 ---
 
-## Generating API reference (Dokka)
+## API reference
 
-```bash
-./gradlew :lan-coordinator:dokkaHtml
-```
-
-Output: `lan-coordinator/build/dokka/html/index.html` — open in any browser.
+Dokka is not configured in this module by default. Use the source KDoc directly,
+or add the Dokka Gradle plugin before running any Dokka task.
 
 ---
 
