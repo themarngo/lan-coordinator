@@ -1,0 +1,66 @@
+buildscript {
+    ext.kotlin_version = '2.2.0'
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.11.2'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    namespace 'com.marn.go.coordinator'
+    compileSdk 36
+
+    defaultConfig {
+        minSdk 24
+        consumerProguardFiles 'consumer-rules.pro'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    // Coroutines — StateFlow, coroutineScope, Dispatchers
+    def coroutines_version = "1.9.0"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:$coroutines_version"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutines_version"
+
+    // Ktor — embedded HTTP server (coordinator) + HTTP client (client devices)
+    // Using 'implementation' (not 'api') so Ktor internals are NOT exposed to consumers.
+    // Ktor 3.x is required for Kotlin 2.x compatibility.
+    def ktor_version = "3.0.3"
+    implementation "io.ktor:ktor-server-core:$ktor_version"
+    implementation "io.ktor:ktor-server-cio:$ktor_version"
+    implementation "io.ktor:ktor-client-core:$ktor_version"
+    implementation "io.ktor:ktor-client-cio:$ktor_version"
+
+    // Timber — structured logging (replaces android.util.Log inside the lib)
+    implementation 'com.jakewharton.timber:timber:5.0.1'
+}

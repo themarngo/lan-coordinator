@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Library manifest — intentionally minimal.
+    Permissions the consuming app must declare:
+        android.permission.INTERNET
+        android.permission.ACCESS_NETWORK_STATE
+    (Both are almost certainly already present in any app using this library.)
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

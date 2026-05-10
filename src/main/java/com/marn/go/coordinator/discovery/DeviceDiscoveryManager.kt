@@ -1,0 +1,318 @@
+package com.marn.go.coordinator.discovery
+
+import com.marn.go.coordinator.network.NetworkConfig
+import timber.log.Timber
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.NetworkInterface
+import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * UDP-based device discovery, leader election, and counter sync.
+ *
+ * Responsibilities:
+ *  1. Discovery  — broadcasts MSG_SEARCH_PREFIX+deviceId on start, waits
+ *                  [NetworkConfig.DISCOVERY_TIMEOUT_MS].
+ *  2. Tiebreaker — if two devices discover simultaneously, the one with the
+ *                  lexicographically higher [myDeviceId] wins; the lower-ID
+ *                  device yields, preventing split-brain.
+ *  3. Sync phase — after winning election, the new coordinator broadcasts
+ *                  MSG_SYNC_REQUEST and waits [NetworkConfig.SYNC_COLLECT_MS]
+ *                  for all devices to reply with their last order number.
+ *                  The coordinator then resumes from max(all replies), ensuring
+ *                  no duplicate order numbers after a coordinator crash.
+ *  4. Heartbeat  — coordinator broadcasts MSG_HEARTBEAT every
+ *                  [NetworkConfig.HEARTBEAT_INTERVAL_MS].
+ *  5. Watchdog   — clients detect coordinator silence and trigger re-election.
+ */
+internal class DeviceDiscoveryManager(
+    private val listener   : DiscoveryListener,
+    private val myDeviceId : String
+) {
+    interface DiscoveryListener {
+        fun onBecomeCoordinator(startingNumber: Int)
+        fun onCoordinatorFound(coordinatorIp: String)
+        fun onCoordinatorLost()
+        /** Called during sync phase — return the last order number this device received. */
+        fun getLastKnownNumber(): Int
+    }
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    private var udpSocket       : DatagramSocket? = null
+    private var role            = Role.DISCOVERING
+    private var discoveryJob    : Job?   = null
+    private var heartbeatJob    : Job?   = null
+    private var lastHeartbeatMs = 0L
+    private var coordinatorTermMs = 0L
+    private var myIp            = ""
+
+    @Volatile private var yieldedToHigherId = false
+
+    /**
+     * Tracks the maximum last-order-number received during the sync phase.
+     * Seeded with this device's own last number before the broadcast,
+     * then updated as POS_SYNC_REPLY messages arrive.
+     */
+    private val syncMax = AtomicInteger(0)
+
+    private enum class Role { DISCOVERING, SYNCING, COORDINATOR, CLIENT }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────
+
+    fun start() {
+        myIp      = getDeviceIp()
+        udpSocket = DatagramSocket(NetworkConfig.UDP_PORT).apply { broadcast = true }
+        Timber.d("Starting — myIp=$myIp  deviceId=$myDeviceId")
+        scope.launch { receiverLoop() }
+        startDiscovery(delayMs = 0)
+    }
+
+    fun stop() {
+        scope.cancel()
+        runCatching { udpSocket?.close() }
+    }
+
+    private fun startDiscovery(delayMs: Long) {
+        discoveryJob?.cancel()
+        discoveryJob = scope.launch {
+            if (delayMs > 0) delay(delayMs)
+            runDiscovery()
+        }
+    }
+
+    // ── Discovery sequence ────────────────────────────────────────────────
+
+    private suspend fun runDiscovery() {
+        role              = Role.DISCOVERING
+        yieldedToHigherId = false
+
+        broadcast(NetworkConfig.MSG_SEARCH_PREFIX + myDeviceId)
+        delay(NetworkConfig.DISCOVERY_TIMEOUT_MS)
+
+        if (role != Role.DISCOVERING) return   // became CLIENT via announce/heartbeat
+
+        if (yieldedToHigherId) {
+            Timber.d("Yielded to higher-ID device — waiting ${NetworkConfig.YIELD_EXTRA_WAIT_MS}ms")
+            delay(NetworkConfig.YIELD_EXTRA_WAIT_MS)
+        }
+
+        if (role != Role.DISCOVERING) return   // coordinator announced during extra wait
+
+        // Won the election — run sync phase before starting the server.
+        runSyncPhase()
+    }
+
+    /**
+     * Sync phase: broadcast POS_SYNC_REQUEST so every device reports its
+     * last known order number. After [NetworkConfig.SYNC_COLLECT_MS] ms,
+     * start the coordinator server from max(all received numbers).
+     *
+     * This prevents issuing duplicate order numbers when a coordinator crashes:
+     * even if the winning device only knew up to N-1, another device's reply
+     * of N pushes the new coordinator to resume from N, issuing N+1 next.
+     */
+    private suspend fun runSyncPhase() {
+        role = Role.SYNCING
+        // Seed with our own last number so we're included in the max.
+        syncMax.set(listener.getLastKnownNumber())
+
+        Timber.d("Sync phase started — myLastNumber=${syncMax.get()}")
+        broadcast(NetworkConfig.MSG_SYNC_REQUEST)
+        delay(NetworkConfig.SYNC_COLLECT_MS)
+
+        val resumeFrom = syncMax.get()
+        Timber.d("Sync phase done — resumeFrom=$resumeFrom → becoming coordinator")
+
+        coordinatorTermMs = System.currentTimeMillis()
+        role = Role.COORDINATOR
+        listener.onBecomeCoordinator(resumeFrom)
+
+        // Explicitly announce to ALL devices (including those in yield-wait) that
+        // we are now coordinator.  Without this, yielding devices only learn of the
+        // new coordinator when the first heartbeat arrives — which may be after their
+        // YIELD_EXTRA_WAIT_MS expires, causing them to self-elect (split-brain).
+        broadcast(NetworkConfig.MSG_ANNOUNCE_PREFIX + coordinatorPayload())
+
+        startHeartbeating()
+    }
+
+    // ── Message dispatcher ────────────────────────────────────────────────
+
+    private fun handleMessage(msg: String, senderIp: String) {
+        if (senderIp == myIp) return
+
+        when {
+            // ── Incoming discovery search ────────────────────────────────
+            msg.startsWith(NetworkConfig.MSG_SEARCH_PREFIX) -> {
+                val theirId = msg.removePrefix(NetworkConfig.MSG_SEARCH_PREFIX)
+                when (role) {
+                    Role.COORDINATOR ->
+                        // Respond so the newcomer immediately becomes a client.
+                        broadcast(NetworkConfig.MSG_ANNOUNCE_PREFIX + coordinatorPayload())
+
+                    Role.DISCOVERING -> {
+                        if (theirId > myDeviceId) {
+                            yieldedToHigherId = true
+                            Timber.d("Competing search from higher-ID $theirId — yielding")
+                        } else {
+                            Timber.d("Competing search from lower-ID $theirId — we win")
+                        }
+                    }
+
+                    else -> { /* SYNCING or CLIENT — ignore */ }
+                }
+            }
+
+            // ── Coordinator announce (while discovering) ─────────────────
+            msg.startsWith(NetworkConfig.MSG_ANNOUNCE_PREFIX) -> {
+                val payload = msg.removePrefix(NetworkConfig.MSG_ANNOUNCE_PREFIX)
+                when (role) {
+                    Role.DISCOVERING, Role.SYNCING -> becomeClient(parseCoordinatorIp(payload))
+                    Role.COORDINATOR -> handleCoordinatorConflict(payload, senderIp)
+                    else -> Unit
+                }
+            }
+
+            // ── Heartbeat received while still discovering ────────────────
+            msg.startsWith(NetworkConfig.MSG_HEARTBEAT_PREFIX) -> {
+                val payload = msg.removePrefix(NetworkConfig.MSG_HEARTBEAT_PREFIX)
+                when (role) {
+                    Role.DISCOVERING -> becomeClient(parseCoordinatorIp(payload))
+                    Role.CLIENT -> lastHeartbeatMs = System.currentTimeMillis()
+                    Role.COORDINATOR -> handleCoordinatorConflict(payload, senderIp)
+                    else -> Unit
+                }
+            }
+
+            // ── Sync request — reply with our last known order number ─────
+            msg == NetworkConfig.MSG_SYNC_REQUEST && role != Role.SYNCING -> {
+                val myLast = listener.getLastKnownNumber()
+                Timber.d("Sync request received — replying with $myLast")
+                broadcast("${NetworkConfig.MSG_SYNC_REPLY_PREFIX}$myLast")
+            }
+
+            // ── Sync reply — update running maximum ───────────────────────
+            msg.startsWith(NetworkConfig.MSG_SYNC_REPLY_PREFIX) && role == Role.SYNCING -> {
+                val n = msg.removePrefix(NetworkConfig.MSG_SYNC_REPLY_PREFIX).toIntOrNull() ?: 0
+                val updated = syncMax.updateAndGet { maxOf(it, n) }
+                Timber.d("Sync reply from $senderIp: n=$n  currentMax=$updated")
+            }
+        }
+    }
+
+    // ── Role transitions ──────────────────────────────────────────────────
+
+    private fun becomeClient(coordinatorIp: String) {
+        Timber.d("Coordinator found at $coordinatorIp")
+        role            = Role.CLIENT
+        lastHeartbeatMs = System.currentTimeMillis()
+        listener.onCoordinatorFound(coordinatorIp)
+        startHeartbeatWatchdog()
+    }
+
+    private fun handleCoordinatorConflict(payload: String, senderIp: String) {
+        val theirTerm = parseCoordinatorTerm(payload)
+        val shouldYield = when {
+            theirTerm == null -> true
+            theirTerm > coordinatorTermMs -> true
+            theirTerm == coordinatorTermMs -> senderIp > myIp
+            else -> false
+        }
+
+        if (shouldYield) {
+            val coordinatorIp = parseCoordinatorIp(payload)
+            Timber.w("Another coordinator detected at $coordinatorIp — yielding")
+            becomeClient(coordinatorIp)
+        }
+    }
+
+    // ── Heartbeat broadcaster (coordinator) ──────────────────────────────
+
+    private fun startHeartbeating() {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            while (role == Role.COORDINATOR) {
+                broadcast(NetworkConfig.MSG_HEARTBEAT_PREFIX + coordinatorPayload())
+                delay(NetworkConfig.HEARTBEAT_INTERVAL_MS)
+            }
+        }
+    }
+
+    // ── Heartbeat watchdog (client) ───────────────────────────────────────
+
+    private fun startHeartbeatWatchdog() {
+        heartbeatJob?.cancel()
+        heartbeatJob = scope.launch {
+            val maxSilence = NetworkConfig.HEARTBEAT_INTERVAL_MS * NetworkConfig.MAX_MISSED_HEARTBEATS
+            while (role == Role.CLIENT) {
+                delay(NetworkConfig.HEARTBEAT_INTERVAL_MS)
+                if (System.currentTimeMillis() - lastHeartbeatMs > maxSilence) {
+                    Timber.w("Coordinator silent — re-electing")
+                    role = Role.DISCOVERING
+                    listener.onCoordinatorLost()
+                    startDiscovery(delayMs = 500)
+                    break
+                }
+            }
+        }
+    }
+
+    // ── UDP helpers ───────────────────────────────────────────────────────
+
+    private fun receiverLoop() {
+        val buffer = ByteArray(1024)
+        val socket = udpSocket ?: return
+        while (!socket.isClosed) {
+            try {
+                socket.soTimeout = NetworkConfig.UDP_RECEIVE_TIMEOUT_MS
+                val packet = DatagramPacket(buffer, buffer.size)
+                socket.receive(packet)
+                val msg      = String(packet.data, 0, packet.length).trim()
+                val senderIp = packet.address.hostAddress ?: continue
+                handleMessage(msg, senderIp)
+            } catch (_: Exception) { /* soTimeout on idle — expected */ }
+        }
+    }
+
+    private fun broadcast(message: String) {
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val data   = message.toByteArray()
+                val packet = DatagramPacket(
+                    data, data.size,
+                    InetAddress.getByName("255.255.255.255"),
+                    NetworkConfig.UDP_PORT
+                )
+                udpSocket?.send(packet)
+            }.onFailure { Timber.e("Broadcast error: ${it.message}") }
+        }
+    }
+
+    private fun coordinatorPayload(): String = "$myIp|$coordinatorTermMs"
+
+    private fun parseCoordinatorIp(payload: String): String =
+        payload.substringBefore('|')
+
+    private fun parseCoordinatorTerm(payload: String): Long? =
+        payload.substringAfter('|', missingDelimiterValue = "").toLongOrNull()
+
+    private fun getDeviceIp(): String = try {
+        NetworkInterface.getNetworkInterfaces()
+            ?.asSequence()
+            ?.filter { it.isUp && !it.isLoopback }
+            ?.flatMap { it.inetAddresses.asSequence() }
+            ?.filterIsInstance<Inet4Address>()
+            ?.firstOrNull { !it.isLoopbackAddress }
+            ?.hostAddress ?: "0.0.0.0"
+    } catch (e: Exception) { "0.0.0.0" }
+}
