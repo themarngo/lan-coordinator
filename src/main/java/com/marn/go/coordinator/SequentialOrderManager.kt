@@ -88,7 +88,7 @@ class SequentialOrderManager(
     private val tag        = "SequentialOrderManager"
     private val myDeviceId = deviceId.ifBlank { detectMacAddress(context) }
     private val discovery  = DeviceDiscoveryManager(this, myDeviceId)
-    private val client     = CoordinatorClient()
+    private var client     = CoordinatorClient()
     private var server     : CoordinatorServer? = null
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -157,6 +157,8 @@ class SequentialOrderManager(
         Timber.d("Role → CLIENT (coordinator=$coordinatorIp)")
         server?.stop()
         server = null
+        client.close()
+        client = CoordinatorClient()
         _state.value = _state.value.copy(
             role          = DeviceRole.CLIENT,
             coordinatorIp = coordinatorIp,
