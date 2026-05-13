@@ -40,6 +40,10 @@ result.onFailure {
     // Coordinator unreachable — keep order.orderNo as-is (local prefixed fallback)
 }
 
+// Optional: reset from the coordinator device only.
+// After this succeeds, the next assigned number is 1.
+manager.resetSequence(to = 0)
+
 // 4. Clean up when ViewModel is cleared
 manager.stop()
 ```
@@ -118,6 +122,22 @@ D3 replies to sync — lastKnown = 100
 New coordinator starts from max(99, 100) = 100
 Next issued number = 101  ✓  no duplicate
 ```
+
+### Resetting the sequence
+
+The active coordinator can reset its counter:
+
+```kotlin
+val reset = manager.resetSequence(to = 0)
+```
+
+After a successful reset to `0`, the next assigned order number is `1`.
+
+Reset is coordinator-only. Calling it from a client or while discovering returns
+`Result.failure`. In the current implementation, reset updates the current
+coordinator only. If another device still has a higher persisted last number and
+later becomes coordinator, the sync phase will resume from that higher number.
+For a full branch-wide reset, stop or reset all terminals before orders resume.
 
 ---
 

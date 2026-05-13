@@ -135,6 +135,34 @@ class SequentialOrderManager(
             Result.failure(IllegalStateException("Still discovering — please wait a moment"))
     }
 
+    /**
+     * Resets the current coordinator counter to [to].
+     *
+     * Only the active coordinator can reset the sequence. After a successful
+     * reset, the next assigned order number will be [to] + 1.
+     *
+     * This reset is local to the current coordinator. If other devices still
+     * have a higher persisted last number and later win re-election, sync will
+     * resume from that higher number.
+     */
+    fun resetSequence(to: Int = 0): Result<Unit> {
+        if (to < 0) {
+            return Result.failure(IllegalArgumentException("Sequence reset value must be >= 0"))
+        }
+
+        if (_state.value.role != DeviceRole.COORDINATOR) {
+            return Result.failure(IllegalStateException("Only the coordinator can reset the sequence"))
+        }
+
+        val srv = server
+            ?: return Result.failure(IllegalStateException("Server not initialised"))
+
+        srv.setCounter(to)
+        persistAndUpdate(to)
+        Timber.w("Sequence reset to $to; next order number will be ${to + 1}")
+        return Result.success(Unit)
+    }
+
     // ── DiscoveryListener ─────────────────────────────────────────────────
 
     override fun onBecomeCoordinator(startingNumber: Int) {
