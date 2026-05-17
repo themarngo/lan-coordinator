@@ -37,6 +37,7 @@ object NetworkConfig {
     const val HTTP_TIMEOUT_MS         = 3_000L   // 3s   — HTTP request timeout to coordinator
     const val SYNC_COLLECT_MS         = 1_500L   // 1.5s — collect sync replies from all devices
     const val YIELD_EXTRA_WAIT_MS     = 4_000L   // 4s   — must exceed DISCOVERY_TIMEOUT + SYNC_COLLECT
+    const val STATE_REBROADCAST_INTERVAL_MS = 100L // 0.1s — repeat fresh counter state after assignment
 
     // ── UDP discovery tokens ─────────────────────────────────────────────────
     /**

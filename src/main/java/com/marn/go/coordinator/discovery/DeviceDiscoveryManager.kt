@@ -84,9 +84,11 @@ internal class DeviceDiscoveryManager(
         runCatching { udpSocket?.close() }
     }
 
-    fun publishCoordinatorState() {
+    fun publishCoordinatorState(repeatCount: Int = 1) {
         if (role == Role.COORDINATOR) {
-            broadcast(NetworkConfig.MSG_HEARTBEAT_PREFIX + coordinatorPayload())
+            val payload = coordinatorPayload()
+            Timber.d("Publishing coordinator heartbeat payload=$payload repeats=$repeatCount")
+            repeatBroadcast(NetworkConfig.MSG_HEARTBEAT_PREFIX + payload, repeatCount)
         }
     }
 
@@ -207,6 +209,7 @@ internal class DeviceDiscoveryManager(
                     Role.CLIENT -> {
                         lastHeartbeatMs = System.currentTimeMillis()
                         observeCoordinatorCounter(payload)
+                        Timber.d("Heartbeat received from ${resolveCoordinatorIp(payload, senderIp)} payload=$payload")
                     }
                     Role.COORDINATOR -> handleCoordinatorConflict(payload, senderIp)
                     else -> Unit
@@ -261,7 +264,9 @@ internal class DeviceDiscoveryManager(
         heartbeatJob?.cancel()
         heartbeatJob = scope.launch {
             while (role == Role.COORDINATOR) {
-                broadcast(NetworkConfig.MSG_HEARTBEAT_PREFIX + coordinatorPayload())
+                val payload = coordinatorPayload()
+                Timber.d("Heartbeat broadcast payload=$payload")
+                broadcast(NetworkConfig.MSG_HEARTBEAT_PREFIX + payload)
                 delay(NetworkConfig.HEARTBEAT_INTERVAL_MS)
             }
         }
@@ -317,6 +322,26 @@ internal class DeviceDiscoveryManager(
         }
     }
 
+    private fun repeatBroadcast(message: String, repeatCount: Int) {
+        scope.launch(Dispatchers.IO) {
+            repeat(repeatCount.coerceAtLeast(1)) { index ->
+                runCatching {
+                    val data = message.toByteArray()
+                    val packet = DatagramPacket(
+                        data, data.size,
+                        InetAddress.getByName("255.255.255.255"),
+                        NetworkConfig.UDP_PORT
+                    )
+                    udpSocket?.send(packet)
+                }.onFailure { Timber.e("Broadcast error: ${it.message}") }
+
+                if (index < repeatCount - 1) {
+                    delay(NetworkConfig.STATE_REBROADCAST_INTERVAL_MS)
+                }
+            }
+        }
+    }
+
     private fun coordinatorPayload(): String {
         val currentIp = getDeviceIp()
         if (currentIp != "0.0.0.0") myIp = currentIp
@@ -342,7 +367,10 @@ internal class DeviceDiscoveryManager(
         payload.split('|').getOrNull(1)?.toLongOrNull()
 
     private fun observeCoordinatorCounter(payload: String) {
-        parseCoordinatorLastNumber(payload)?.let { listener.onCoordinatorCounterObserved(it) }
+        parseCoordinatorLastNumber(payload)?.let {
+            Timber.d("Coordinator counter observed from heartbeat/announce: $it")
+            listener.onCoordinatorCounterObserved(it)
+        }
     }
 
     private fun parseCoordinatorLastNumber(payload: String): Int? =

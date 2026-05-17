@@ -173,7 +173,7 @@ class SequentialOrderManager(
         server = CoordinatorServer(startingNumber).also { srv ->
             srv.onNumberAssigned = { n ->
                 persistAndUpdate(n)
-                discovery.publishCoordinatorState()
+                discovery.publishCoordinatorState(repeatCount = 3)
             }
             srv.start()
         }
