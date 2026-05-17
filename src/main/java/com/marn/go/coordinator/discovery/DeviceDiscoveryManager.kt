@@ -8,6 +8,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -48,7 +49,7 @@ internal class DeviceDiscoveryManager(
         fun onCoordinatorCounterObserved(lastOrderNumber: Int)
     }
 
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var udpSocket       : DatagramSocket? = null
     private var role            = Role.DISCOVERING
@@ -73,6 +74,17 @@ internal class DeviceDiscoveryManager(
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
     fun start() {
+        if (!scope.isActive) {
+            scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        }
+        discoveryJob?.cancel()
+        heartbeatJob?.cancel()
+        runCatching { udpSocket?.close() }
+        role = Role.DISCOVERING
+        yieldedToHigherId = false
+        abortSyncForHigherId = false
+        coordinatorTermMs = 0L
+        lastHeartbeatMs = 0L
         myIp      = getDeviceIp()
         udpSocket = DatagramSocket(NetworkConfig.UDP_PORT).apply { broadcast = true }
         Timber.d("Starting — myIp=$myIp  deviceId=$myDeviceId")
@@ -81,8 +93,12 @@ internal class DeviceDiscoveryManager(
     }
 
     fun stop() {
+        role = Role.DISCOVERING
+        discoveryJob?.cancel()
+        heartbeatJob?.cancel()
         scope.cancel()
         runCatching { udpSocket?.close() }
+        udpSocket = null
     }
 
     fun publishCoordinatorState(repeatCount: Int = 1) {

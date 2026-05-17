@@ -103,6 +103,12 @@ class SequentialOrderManager(
         server?.stop()
         server = null
         client.close()
+        client = CoordinatorClient()
+        _state.value = _state.value.copy(
+            role = DeviceRole.DISCOVERING,
+            coordinatorIp = "—",
+            statusMessage = "Sequential LAN coordinator stopped"
+        )
         Timber.d("stop()")
     }
 
