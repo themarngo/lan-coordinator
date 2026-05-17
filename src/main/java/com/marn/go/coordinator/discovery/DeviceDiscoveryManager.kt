@@ -59,6 +59,7 @@ internal class DeviceDiscoveryManager(
     private var myIp            = ""
 
     @Volatile private var yieldedToHigherId = false
+    @Volatile private var abortSyncForHigherId = false
 
     /**
      * Tracks the maximum last-order-number received during the sync phase.
@@ -106,6 +107,7 @@ internal class DeviceDiscoveryManager(
     private suspend fun runDiscovery() {
         role              = Role.DISCOVERING
         yieldedToHigherId = false
+        abortSyncForHigherId = false
 
         broadcast(NetworkConfig.MSG_SEARCH_PREFIX + myDeviceId)
         delay(NetworkConfig.DISCOVERY_TIMEOUT_MS)
@@ -141,6 +143,19 @@ internal class DeviceDiscoveryManager(
         Timber.d("Sync phase started — myLastNumber=${syncMax.get()}")
         broadcast(NetworkConfig.MSG_SYNC_REQUEST)
         delay(NetworkConfig.SYNC_COLLECT_MS)
+
+        if (role != Role.SYNCING || abortSyncForHigherId) {
+            val abortedForHigherId = abortSyncForHigherId
+            Timber.d("Sync phase aborted — role changed to $role")
+            role = Role.DISCOVERING
+            abortSyncForHigherId = false
+            if (abortedForHigherId) {
+                Timber.d("Waiting ${NetworkConfig.YIELD_EXTRA_WAIT_MS}ms for higher-ID coordinator announce")
+                delay(NetworkConfig.YIELD_EXTRA_WAIT_MS)
+                if (role == Role.DISCOVERING) startDiscovery(delayMs = 0)
+            }
+            return
+        }
 
         val resumeFrom = syncMax.get()
         Timber.d("Sync phase done — resumeFrom=$resumeFrom → becoming coordinator")
@@ -181,7 +196,17 @@ internal class DeviceDiscoveryManager(
                         }
                     }
 
-                    else -> { /* SYNCING or CLIENT — ignore */ }
+                    Role.SYNCING -> {
+                        if (theirId > myDeviceId) {
+                            yieldedToHigherId = true
+                            abortSyncForHigherId = true
+                            Timber.d("Competing search from higher-ID $theirId while syncing — yielding")
+                        } else {
+                            Timber.d("Competing search from lower-ID $theirId while syncing — we continue")
+                        }
+                    }
+
+                    Role.CLIENT -> { /* ignore */ }
                 }
             }
 
@@ -244,7 +269,9 @@ internal class DeviceDiscoveryManager(
 
     private fun handleCoordinatorConflict(payload: String, senderIp: String) {
         val theirTerm = parseCoordinatorTerm(payload)
+        val theirDeviceId = parseCoordinatorDeviceId(payload)
         val shouldYield = when {
+            theirDeviceId != null && theirDeviceId != myDeviceId -> theirDeviceId > myDeviceId
             theirTerm == null -> true
             theirTerm > coordinatorTermMs -> true
             theirTerm == coordinatorTermMs -> senderIp > myIp
@@ -345,7 +372,7 @@ internal class DeviceDiscoveryManager(
     private fun coordinatorPayload(): String {
         val currentIp = getDeviceIp()
         if (currentIp != "0.0.0.0") myIp = currentIp
-        return "$myIp|$coordinatorTermMs|${listener.getLastKnownNumber()}"
+        return "$myIp|$coordinatorTermMs|${listener.getLastKnownNumber()}|$myDeviceId"
     }
 
     private fun parseCoordinatorIp(payload: String): String =
@@ -375,6 +402,9 @@ internal class DeviceDiscoveryManager(
 
     private fun parseCoordinatorLastNumber(payload: String): Int? =
         payload.split('|').getOrNull(2)?.toIntOrNull()
+
+    private fun parseCoordinatorDeviceId(payload: String): String? =
+        payload.split('|').getOrNull(3)?.takeIf { it.isNotBlank() }
 
     private fun isLocalIp(ip: String): Boolean = try {
         NetworkInterface.getNetworkInterfaces()
