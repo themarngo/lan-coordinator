@@ -44,6 +44,8 @@ internal class DeviceDiscoveryManager(
         fun onCoordinatorLost()
         /** Called during sync phase — return the last order number this device received. */
         fun getLastKnownNumber(): Int
+        /** Called when a coordinator heartbeat/announce carries a newer counter value. */
+        fun onCoordinatorCounterObserved(lastOrderNumber: Int)
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -82,11 +84,17 @@ internal class DeviceDiscoveryManager(
         runCatching { udpSocket?.close() }
     }
 
+    fun publishCoordinatorState() {
+        if (role == Role.COORDINATOR) {
+            broadcast(NetworkConfig.MSG_HEARTBEAT_PREFIX + coordinatorPayload())
+        }
+    }
+
     private fun startDiscovery(delayMs: Long) {
         discoveryJob?.cancel()
         discoveryJob = scope.launch {
             if (delayMs > 0) delay(delayMs)
-              myIp = getDeviceIp()
+            myIp = getDeviceIp()
             runDiscovery()
         }
     }
@@ -179,7 +187,10 @@ internal class DeviceDiscoveryManager(
             msg.startsWith(NetworkConfig.MSG_ANNOUNCE_PREFIX) -> {
                 val payload = msg.removePrefix(NetworkConfig.MSG_ANNOUNCE_PREFIX)
                 when (role) {
-                    Role.DISCOVERING, Role.SYNCING -> becomeClient(resolveCoordinatorIp(payload, senderIp))
+                    Role.DISCOVERING, Role.SYNCING -> {
+                        observeCoordinatorCounter(payload)
+                        becomeClient(resolveCoordinatorIp(payload, senderIp))
+                    }
                     Role.COORDINATOR -> handleCoordinatorConflict(payload, senderIp)
                     else -> Unit
                 }
@@ -189,8 +200,14 @@ internal class DeviceDiscoveryManager(
             msg.startsWith(NetworkConfig.MSG_HEARTBEAT_PREFIX) -> {
                 val payload = msg.removePrefix(NetworkConfig.MSG_HEARTBEAT_PREFIX)
                 when (role) {
-                    Role.DISCOVERING -> becomeClient(resolveCoordinatorIp(payload, senderIp))
-                    Role.CLIENT -> lastHeartbeatMs = System.currentTimeMillis()
+                    Role.DISCOVERING -> {
+                        observeCoordinatorCounter(payload)
+                        becomeClient(resolveCoordinatorIp(payload, senderIp))
+                    }
+                    Role.CLIENT -> {
+                        lastHeartbeatMs = System.currentTimeMillis()
+                        observeCoordinatorCounter(payload)
+                    }
                     Role.COORDINATOR -> handleCoordinatorConflict(payload, senderIp)
                     else -> Unit
                 }
@@ -303,7 +320,7 @@ internal class DeviceDiscoveryManager(
     private fun coordinatorPayload(): String {
         val currentIp = getDeviceIp()
         if (currentIp != "0.0.0.0") myIp = currentIp
-        return "$myIp|$coordinatorTermMs"
+        return "$myIp|$coordinatorTermMs|${listener.getLastKnownNumber()}"
     }
 
     private fun parseCoordinatorIp(payload: String): String =
@@ -322,7 +339,14 @@ internal class DeviceDiscoveryManager(
     }
 
     private fun parseCoordinatorTerm(payload: String): Long? =
-        payload.substringAfter('|', missingDelimiterValue = "").toLongOrNull()
+        payload.split('|').getOrNull(1)?.toLongOrNull()
+
+    private fun observeCoordinatorCounter(payload: String) {
+        parseCoordinatorLastNumber(payload)?.let { listener.onCoordinatorCounterObserved(it) }
+    }
+
+    private fun parseCoordinatorLastNumber(payload: String): Int? =
+        payload.split('|').getOrNull(2)?.toIntOrNull()
 
     private fun isLocalIp(ip: String): Boolean = try {
         NetworkInterface.getNetworkInterfaces()

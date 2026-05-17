@@ -171,9 +171,13 @@ class SequentialOrderManager(
         Timber.d("Role → COORDINATOR (resuming from $startingNumber)")
         server?.stop()
         server = CoordinatorServer(startingNumber).also { srv ->
-            srv.onNumberAssigned = { n -> persistAndUpdate(n) }
+            srv.onNumberAssigned = { n ->
+                persistAndUpdate(n)
+                discovery.publishCoordinatorState()
+            }
             srv.start()
         }
+        persistAndUpdate(startingNumber)
         _state.value = _state.value.copy(
             role          = DeviceRole.COORDINATOR,
             coordinatorIp = "this device",
@@ -208,6 +212,13 @@ class SequentialOrderManager(
      * coordinator can collect the true maximum last-order-number across all devices.
      */
     override fun getLastKnownNumber(): Int = _state.value.lastOrderNumber
+
+    override fun onCoordinatorCounterObserved(lastOrderNumber: Int) {
+        if (lastOrderNumber > _state.value.lastOrderNumber) {
+            Timber.d("Observed coordinator counter #$lastOrderNumber")
+            persistAndUpdate(lastOrderNumber)
+        }
+    }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
