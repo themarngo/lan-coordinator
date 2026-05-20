@@ -66,7 +66,7 @@ class SequentialOrderManager(
 
     // ── Public state ──────────────────────────────────────────────────────
 
-    enum class DeviceRole { DISCOVERING, COORDINATOR, CLIENT }
+    enum class DeviceRole { DISCOVERING, SYNCING, COORDINATOR, CLIENT, DISCONNECTED }
 
     data class State(
         val role            : DeviceRole = DeviceRole.DISCOVERING,
@@ -105,7 +105,7 @@ class SequentialOrderManager(
         client.close()
         client = CoordinatorClient()
         _state.value = _state.value.copy(
-            role = DeviceRole.DISCOVERING,
+            role = DeviceRole.DISCONNECTED,
             coordinatorIp = "—",
             statusMessage = "Sequential LAN coordinator stopped"
         )
@@ -137,8 +137,10 @@ class SequentialOrderManager(
             }
         }
 
-        DeviceRole.DISCOVERING ->
-            Result.failure(IllegalStateException("Still discovering — please wait a moment"))
+        DeviceRole.DISCOVERING,
+        DeviceRole.SYNCING,
+        DeviceRole.DISCONNECTED ->
+            Result.failure(IllegalStateException("Coordinator unavailable while role=${_state.value.role}"))
     }
 
     /**
@@ -170,6 +172,33 @@ class SequentialOrderManager(
     }
 
     // ── DiscoveryListener ─────────────────────────────────────────────────
+
+    override fun onDiscoveryStarted() {
+        Timber.d("Role → DISCOVERING")
+        _state.value = _state.value.copy(
+            role          = DeviceRole.DISCOVERING,
+            coordinatorIp = "—",
+            statusMessage = "Searching for coordinator…"
+        )
+    }
+
+    override fun onElectionYielded() {
+        Timber.d("Role → DISCOVERING (waiting for coordinator)")
+        _state.value = _state.value.copy(
+            role          = DeviceRole.DISCOVERING,
+            coordinatorIp = "—",
+            statusMessage = "Waiting for coordinator to announce…"
+        )
+    }
+
+    override fun onSyncStarted() {
+        Timber.d("Role → SYNCING")
+        _state.value = _state.value.copy(
+            role          = DeviceRole.SYNCING,
+            coordinatorIp = "—",
+            statusMessage = "Syncing sequence before becoming coordinator…"
+        )
+    }
 
     override fun onBecomeCoordinator(startingNumber: Int) {
         // startingNumber = max(all sync replies) — already accounts for every

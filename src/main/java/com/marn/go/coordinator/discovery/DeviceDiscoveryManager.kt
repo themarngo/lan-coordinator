@@ -40,6 +40,9 @@ internal class DeviceDiscoveryManager(
     private val myDeviceId : String
 ) {
     interface DiscoveryListener {
+        fun onDiscoveryStarted()
+        fun onElectionYielded()
+        fun onSyncStarted()
         fun onBecomeCoordinator(startingNumber: Int)
         fun onCoordinatorFound(coordinatorIp: String)
         fun onCoordinatorLost()
@@ -88,6 +91,7 @@ internal class DeviceDiscoveryManager(
         myIp      = getDeviceIp()
         udpSocket = DatagramSocket(NetworkConfig.UDP_PORT).apply { broadcast = true }
         Timber.d("Starting — myIp=$myIp  deviceId=$myDeviceId")
+        listener.onDiscoveryStarted()
         scope.launch { receiverLoop() }
         startDiscovery(delayMs = 0)
     }
@@ -124,6 +128,7 @@ internal class DeviceDiscoveryManager(
         role              = Role.DISCOVERING
         yieldedToHigherId = false
         abortSyncForHigherId = false
+        listener.onDiscoveryStarted()
 
         broadcast(NetworkConfig.MSG_SEARCH_PREFIX + myDeviceId)
         delay(NetworkConfig.DISCOVERY_TIMEOUT_MS)
@@ -132,6 +137,7 @@ internal class DeviceDiscoveryManager(
 
         if (yieldedToHigherId) {
             Timber.d("Yielded to higher-ID device — waiting ${NetworkConfig.YIELD_EXTRA_WAIT_MS}ms")
+            listener.onElectionYielded()
             delay(NetworkConfig.YIELD_EXTRA_WAIT_MS)
         }
 
@@ -152,6 +158,7 @@ internal class DeviceDiscoveryManager(
      */
     private suspend fun runSyncPhase() {
         role = Role.SYNCING
+        listener.onSyncStarted()
         myIp = getDeviceIp()
         // Seed with our own last number so we're included in the max.
         syncMax.set(listener.getLastKnownNumber())
@@ -206,6 +213,7 @@ internal class DeviceDiscoveryManager(
                     Role.DISCOVERING -> {
                         if (theirId > myDeviceId) {
                             yieldedToHigherId = true
+                            listener.onElectionYielded()
                             Timber.d("Competing search from higher-ID $theirId — yielding")
                         } else {
                             Timber.d("Competing search from lower-ID $theirId — we win")
@@ -216,6 +224,7 @@ internal class DeviceDiscoveryManager(
                         if (theirId > myDeviceId) {
                             yieldedToHigherId = true
                             abortSyncForHigherId = true
+                            listener.onElectionYielded()
                             Timber.d("Competing search from higher-ID $theirId while syncing — yielding")
                         } else {
                             Timber.d("Competing search from lower-ID $theirId while syncing — we continue")

@@ -48,6 +48,10 @@ manager.resetSequence(to = 0)
 manager.stop()
 ```
 
+`manager.state` exposes `role`, `coordinatorIp`, `lastOrderNumber`, and
+`statusMessage`. `role` can be `DISCOVERING`, `SYNCING`, `COORDINATOR`,
+`CLIENT`, or `DISCONNECTED`.
+
 ---
 
 ## Architecture
