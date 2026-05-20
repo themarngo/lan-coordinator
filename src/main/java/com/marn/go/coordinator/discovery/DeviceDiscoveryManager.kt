@@ -243,7 +243,7 @@ internal class DeviceDiscoveryManager(
             msg.startsWith(NetworkConfig.MSG_HEARTBEAT_PREFIX) -> {
                 val payload = msg.removePrefix(NetworkConfig.MSG_HEARTBEAT_PREFIX)
                 when (role) {
-                    Role.DISCOVERING -> {
+                    Role.DISCOVERING, Role.SYNCING -> {
                         observeCoordinatorCounter(payload)
                         becomeClient(resolveCoordinatorIp(payload, senderIp))
                     }
@@ -253,7 +253,6 @@ internal class DeviceDiscoveryManager(
                         Timber.d("Heartbeat received from ${resolveCoordinatorIp(payload, senderIp)} payload=$payload")
                     }
                     Role.COORDINATOR -> handleCoordinatorConflict(payload, senderIp)
-                    else -> Unit
                 }
             }
 
@@ -287,9 +286,10 @@ internal class DeviceDiscoveryManager(
         val theirTerm = parseCoordinatorTerm(payload)
         val theirDeviceId = parseCoordinatorDeviceId(payload)
         val shouldYield = when {
-            theirDeviceId != null && theirDeviceId != myDeviceId -> theirDeviceId > myDeviceId
             theirTerm == null -> true
             theirTerm > coordinatorTermMs -> true
+            theirTerm < coordinatorTermMs -> false
+            theirDeviceId != null && theirDeviceId != myDeviceId -> theirDeviceId > myDeviceId
             theirTerm == coordinatorTermMs -> senderIp > myIp
             else -> false
         }
