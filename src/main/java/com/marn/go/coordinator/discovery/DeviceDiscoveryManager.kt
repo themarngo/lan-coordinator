@@ -493,24 +493,30 @@ internal class DeviceDiscoveryManager(
         payload.split('|').getOrNull(3)?.takeIf { it.isNotBlank() }
 
     private fun refreshLocalIps() {
-        localIps = try {
-            NetworkInterface.getNetworkInterfaces()
-                ?.asSequence()
-                ?.filter { it.isUp && !it.isLoopback }
-                ?.flatMap { it.inetAddresses.asSequence() }
-                ?.filterIsInstance<Inet4Address>()
-                ?.mapNotNull { it.hostAddress }
-                ?.toSet() ?: emptySet()
-        } catch (_: Exception) { localIps }
+        localIps = getLanIpv4Addresses()
     }
 
-    private fun getDeviceIp(): String = try {
+    private fun getDeviceIp(): String =
+        getLanIpv4Addresses().firstOrNull() ?: "0.0.0.0"
+
+    private fun getLanIpv4Addresses(): Set<String> = try {
         NetworkInterface.getNetworkInterfaces()
             ?.asSequence()
-            ?.filter { it.isUp && !it.isLoopback }
+            ?.filter { it.isLanInterface() }
             ?.flatMap { it.inetAddresses.asSequence() }
             ?.filterIsInstance<Inet4Address>()
-            ?.firstOrNull { !it.isLoopbackAddress }
-            ?.hostAddress ?: "0.0.0.0"
-    } catch (e: Exception) { "0.0.0.0" }
+            ?.filter { !it.isLoopbackAddress && !it.isAnyLocalAddress }
+            ?.mapNotNull { it.hostAddress }
+            ?.toSet() ?: emptySet()
+    } catch (_: Exception) { emptySet() }
+
+    private fun NetworkInterface.isLanInterface(): Boolean {
+        val lowerName = name.lowercase()
+        val blockedPrefixes = listOf("rmnet", "ccmni", "pdp", "wwan", "cell", "tun", "tap", "lo", "dummy")
+        if (blockedPrefixes.any { lowerName.startsWith(it) }) return false
+
+        return runCatching {
+            isUp && !isLoopback && !isPointToPoint && supportsMulticast()
+        }.getOrDefault(false)
+    }
 }
