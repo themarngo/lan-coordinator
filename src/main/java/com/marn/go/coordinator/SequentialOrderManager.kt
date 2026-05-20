@@ -242,6 +242,19 @@ class SequentialOrderManager(
         )
     }
 
+    override fun onNetworkDisconnected() {
+        Timber.w("LAN disconnected")
+        server?.stop()
+        server = null
+        client.close()
+        client = CoordinatorClient()
+        _state.value = _state.value.copy(
+            role          = DeviceRole.DISCONNECTED,
+            coordinatorIp = "—",
+            statusMessage = "LAN disconnected"
+        )
+    }
+
     /**
      * Called by [DeviceDiscoveryManager] during the sync phase so the new
      * coordinator can collect the true maximum last-order-number across all devices.

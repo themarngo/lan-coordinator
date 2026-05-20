@@ -32,6 +32,7 @@ object NetworkConfig {
     //
     const val DISCOVERY_TIMEOUT_MS    = 1_500L   // 1.5s — wait for coordinator announce on startup
     const val HEARTBEAT_INTERVAL_MS   = 1_000L   // 1s   — coordinator broadcasts every second
+    const val NETWORK_WATCHDOG_INTERVAL_MS = 2_000L // 2s — check for LAN interface loss/return
     const val MAX_MISSED_HEARTBEATS   = 3        //       — 3 missed = 3s before re-election fires
     const val UDP_RECEIVE_TIMEOUT_MS  = 500       // 0.5s — keeps receiver loop responsive
     const val HTTP_TIMEOUT_MS         = 3_000L   // 3s   — HTTP request timeout to coordinator

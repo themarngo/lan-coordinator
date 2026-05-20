@@ -46,6 +46,7 @@ internal class DeviceDiscoveryManager(
         fun onBecomeCoordinator(startingNumber: Int)
         fun onCoordinatorFound(coordinatorIp: String)
         fun onCoordinatorLost()
+        fun onNetworkDisconnected()
         /** Called during sync phase — return the last order number this device received. */
         fun getLastKnownNumber(): Int
         /** Called when a coordinator heartbeat/announce carries a newer counter value. */
@@ -58,6 +59,7 @@ internal class DeviceDiscoveryManager(
     @Volatile private var role       = Role.DISCOVERING
     private var discoveryJob         : Job?   = null
     private var heartbeatJob         : Job?   = null
+    private var networkJob           : Job?   = null
     @Volatile private var lastHeartbeatMs  = 0L
     @Volatile private var coordinatorTermMs = 0L
     @Volatile private var localIps   : Set<String> = emptySet()
@@ -73,7 +75,7 @@ internal class DeviceDiscoveryManager(
      */
     private val syncMax = AtomicInteger(0)
 
-    private enum class Role { DISCOVERING, SYNCING, COORDINATOR, CLIENT }
+    private enum class Role { DISCOVERING, SYNCING, COORDINATOR, CLIENT, DISCONNECTED }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -83,6 +85,7 @@ internal class DeviceDiscoveryManager(
         }
         discoveryJob?.cancel()
         heartbeatJob?.cancel()
+        networkJob?.cancel()
         runCatching { udpSocket?.close() }
         role = Role.DISCOVERING
         yieldedToHigherId = false
@@ -91,6 +94,13 @@ internal class DeviceDiscoveryManager(
         lastHeartbeatMs = 0L
         myIp      = getDeviceIp()
         refreshLocalIps()
+        startNetworkWatchdog()
+        if (localIps.isEmpty()) {
+            role = Role.DISCONNECTED
+            Timber.w("No LAN IPv4 address available — waiting for network")
+            listener.onNetworkDisconnected()
+            return
+        }
         udpSocket = DatagramSocket(NetworkConfig.UDP_PORT).apply { broadcast = true }
         Timber.d("Starting — myIp=$myIp  deviceId=$myDeviceId")
         listener.onDiscoveryStarted()
@@ -102,6 +112,7 @@ internal class DeviceDiscoveryManager(
         role = Role.DISCOVERING
         discoveryJob?.cancel()
         heartbeatJob?.cancel()
+        networkJob?.cancel()
         scope.cancel()
         runCatching { udpSocket?.close() }
         udpSocket = null
@@ -237,7 +248,7 @@ internal class DeviceDiscoveryManager(
                         }
                     }
 
-                    Role.CLIENT -> { /* ignore */ }
+                    Role.CLIENT, Role.DISCONNECTED -> { /* ignore */ }
                 }
             }
 
@@ -268,6 +279,7 @@ internal class DeviceDiscoveryManager(
                         Timber.d("Heartbeat received from ${resolveCoordinatorIp(payload, senderIp)} payload=$payload")
                     }
                     Role.COORDINATOR -> handleCoordinatorConflict(payload, senderIp)
+                    Role.DISCONNECTED -> Unit
                 }
             }
 
@@ -346,6 +358,50 @@ internal class DeviceDiscoveryManager(
                 }
             }
         }
+    }
+
+    private fun startNetworkWatchdog() {
+        networkJob?.cancel()
+        networkJob = scope.launch {
+            while (isActive) {
+                delay(NetworkConfig.NETWORK_WATCHDOG_INTERVAL_MS)
+                refreshLocalIps()
+
+                if (localIps.isEmpty()) {
+                    if (role != Role.DISCONNECTED) {
+                        Timber.w("LAN disconnected — pausing coordinator discovery")
+                        disconnectFromNetwork()
+                    }
+                } else if (role == Role.DISCONNECTED) {
+                    Timber.i("LAN connected — restarting coordinator discovery")
+                    restartAfterNetworkReturn()
+                }
+            }
+        }
+    }
+
+    private fun disconnectFromNetwork() {
+        role = Role.DISCONNECTED
+        discoveryJob?.cancel()
+        heartbeatJob?.cancel()
+        runCatching { udpSocket?.close() }
+        udpSocket = null
+        listener.onNetworkDisconnected()
+    }
+
+    private fun restartAfterNetworkReturn() {
+        runCatching { udpSocket?.close() }
+        myIp = getDeviceIp()
+        refreshLocalIps()
+        udpSocket = DatagramSocket(NetworkConfig.UDP_PORT).apply { broadcast = true }
+        role = Role.DISCOVERING
+        yieldedToHigherId = false
+        abortSyncForHigherId = false
+        coordinatorTermMs = 0L
+        lastHeartbeatMs = 0L
+        listener.onDiscoveryStarted()
+        scope.launch { receiverLoop() }
+        startDiscovery(delayMs = 0)
     }
 
     // ── UDP helpers ───────────────────────────────────────────────────────
