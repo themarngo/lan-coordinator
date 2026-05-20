@@ -19,6 +19,7 @@ allprojects {
 
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
+apply plugin: 'maven-publish'
 
 android {
     namespace 'com.marn.go.coordinator'
@@ -43,6 +44,25 @@ android {
 
     kotlinOptions {
         jvmTarget = '17'
+    }
+
+    publishing {
+        singleVariant('release') {
+            withSourcesJar()
+        }
+    }
+}
+
+afterEvaluate {
+    publishing {
+        publications {
+            release(MavenPublication) {
+                from components.release
+                groupId = System.getenv("GROUP") ?: "com.github.themarngo"
+                artifactId = System.getenv("ARTIFACT") ?: "lan-coordinator"
+                version = System.getenv("VERSION") ?: "unspecified"
+            }
+        }
     }
 }
 
