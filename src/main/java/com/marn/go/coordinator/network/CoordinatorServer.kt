@@ -67,6 +67,7 @@ internal class CoordinatorServer(startingNumber: Int = 0) {
 
     fun setCounter(value: Int) {
         counter.set(value)
+        onNumberAssigned?.invoke(value)
         Timber.d("Counter synced to $value")
     }
 }

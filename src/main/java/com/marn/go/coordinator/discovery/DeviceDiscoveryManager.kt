@@ -54,13 +54,14 @@ internal class DeviceDiscoveryManager(
 
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private var udpSocket       : DatagramSocket? = null
-    private var role            = Role.DISCOVERING
-    private var discoveryJob    : Job?   = null
-    private var heartbeatJob    : Job?   = null
-    private var lastHeartbeatMs = 0L
-    private var coordinatorTermMs = 0L
-    private var myIp            = ""
+    private var udpSocket            : DatagramSocket? = null
+    @Volatile private var role       = Role.DISCOVERING
+    private var discoveryJob         : Job?   = null
+    private var heartbeatJob         : Job?   = null
+    @Volatile private var lastHeartbeatMs  = 0L
+    @Volatile private var coordinatorTermMs = 0L
+    @Volatile private var localIps   : Set<String> = emptySet()
+    private var myIp                 = ""
 
     @Volatile private var yieldedToHigherId = false
     @Volatile private var abortSyncForHigherId = false
@@ -89,6 +90,7 @@ internal class DeviceDiscoveryManager(
         coordinatorTermMs = 0L
         lastHeartbeatMs = 0L
         myIp      = getDeviceIp()
+        refreshLocalIps()
         udpSocket = DatagramSocket(NetworkConfig.UDP_PORT).apply { broadcast = true }
         Timber.d("Starting — myIp=$myIp  deviceId=$myDeviceId")
         listener.onDiscoveryStarted()
@@ -118,6 +120,7 @@ internal class DeviceDiscoveryManager(
         discoveryJob = scope.launch {
             if (delayMs > 0) delay(delayMs)
             myIp = getDeviceIp()
+            refreshLocalIps()
             runDiscovery()
         }
     }
@@ -160,6 +163,7 @@ internal class DeviceDiscoveryManager(
         role = Role.SYNCING
         listener.onSyncStarted()
         myIp = getDeviceIp()
+        refreshLocalIps()
         // Seed with our own last number so we're included in the max.
         syncMax.set(listener.getLastKnownNumber())
 
@@ -170,8 +174,10 @@ internal class DeviceDiscoveryManager(
         if (role != Role.SYNCING || abortSyncForHigherId) {
             val abortedForHigherId = abortSyncForHigherId
             Timber.d("Sync phase aborted — role changed to $role")
-            role = Role.DISCOVERING
             abortSyncForHigherId = false
+            if (role == Role.CLIENT) return
+
+            role = Role.DISCOVERING
             if (abortedForHigherId) {
                 Timber.d("Waiting ${NetworkConfig.YIELD_EXTRA_WAIT_MS}ms for higher-ID coordinator announce")
                 delay(NetworkConfig.YIELD_EXTRA_WAIT_MS)
@@ -199,7 +205,7 @@ internal class DeviceDiscoveryManager(
     // ── Message dispatcher ────────────────────────────────────────────────
 
     private fun handleMessage(msg: String, senderIp: String) {
-        if (senderIp == myIp || isLocalIp(senderIp)) return
+        if (senderIp == myIp || senderIp in localIps) return
 
         when {
             // ── Incoming discovery search ────────────────────────────────
@@ -295,12 +301,11 @@ internal class DeviceDiscoveryManager(
         val theirTerm = parseCoordinatorTerm(payload)
         val theirDeviceId = parseCoordinatorDeviceId(payload)
         val shouldYield = when {
-            theirTerm == null -> true
-            theirTerm > coordinatorTermMs -> true
-            theirTerm < coordinatorTermMs -> false
+            theirTerm == null                                    -> true
+            theirTerm > coordinatorTermMs                        -> true
+            theirTerm < coordinatorTermMs                        -> false
             theirDeviceId != null && theirDeviceId != myDeviceId -> theirDeviceId > myDeviceId
-            theirTerm == coordinatorTermMs -> senderIp > myIp
-            else -> false
+            else                                                 -> senderIp > myIp
         }
 
         if (shouldYield) {
@@ -431,14 +436,17 @@ internal class DeviceDiscoveryManager(
     private fun parseCoordinatorDeviceId(payload: String): String? =
         payload.split('|').getOrNull(3)?.takeIf { it.isNotBlank() }
 
-    private fun isLocalIp(ip: String): Boolean = try {
-        NetworkInterface.getNetworkInterfaces()
-            ?.asSequence()
-            ?.filter { it.isUp && !it.isLoopback }
-            ?.flatMap { it.inetAddresses.asSequence() }
-            ?.filterIsInstance<Inet4Address>()
-            ?.any { it.hostAddress == ip } == true
-    } catch (e: Exception) { false }
+    private fun refreshLocalIps() {
+        localIps = try {
+            NetworkInterface.getNetworkInterfaces()
+                ?.asSequence()
+                ?.filter { it.isUp && !it.isLoopback }
+                ?.flatMap { it.inetAddresses.asSequence() }
+                ?.filterIsInstance<Inet4Address>()
+                ?.mapNotNull { it.hostAddress }
+                ?.toSet() ?: emptySet()
+        } catch (_: Exception) { localIps }
+    }
 
     private fun getDeviceIp(): String = try {
         NetworkInterface.getNetworkInterfaces()
