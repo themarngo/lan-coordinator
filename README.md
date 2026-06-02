@@ -34,7 +34,6 @@ manager.start()
 val result = manager.getNextOrderNumber()
 result.onSuccess { n ->
     order.orderNo       = n   // pure sequential, no prefix
-    order.transactionNo = n
 }
 result.onFailure {
     // Coordinator unreachable — keep order.orderNo as-is (local prefixed fallback)
